@@ -1,0 +1,1650 @@
+
+
+**“Complete End-to-End Gen AI Project on AWS Using AWS Bedrock and AWS Lambda.”**
+
+
+
+Our final application will look like this:
+
+```text
+                 USER
+                  |
+                  v
+        +-------------------+
+        |   Web Application |
+        |   HTML/CSS/JS     |
+        +---------+---------+
+                  |
+                  | HTTPS
+                  v
+        +-------------------+
+        |   API Gateway     |
+        |   POST /ask       |
+        +---------+---------+
+                  |
+                  v
+        +-------------------+
+        |   AWS Lambda      |
+        |   Python           |
+        +----+---------+----+
+             |         |
+             |         |
+             v         v
+      +-----------+  +-------------+
+      | Bedrock   |  | DynamoDB    |
+      | Nova      |  | Chat History|
+      +-----------+  +-------------+
+             |
+             v
+        AI Generated
+          Response
+
+                  |
+                  v
+            CloudWatch
+              Logs
+```
+
+### AWS services we'll use
+
+| Service            | Purpose                   |
+| ------------------ | ------------------------- |
+| **Amazon Bedrock** | Generative AI model       |
+| **AWS Lambda**     | Backend Python code       |
+| **API Gateway**    | Public REST/HTTP endpoint |
+| **DynamoDB**       | Store questions/answers   |
+| **S3**             | Host frontend             |
+| **CloudWatch**     | Logs and monitoring       |
+| **IAM**            | Permissions/security      |
+
+AWS itself documents the Lambda + API Gateway serverless pattern as a Free Tier-compatible getting-started architecture.
+---
+
+# PART 1 — Prepare your AWS account
+
+## Step 1 — Sign in
+
+
+Sign in.
+
+### Choose one AWS Region
+
+For this project, I recommend:
+
+**US East (N. Virginia) — `us-east-1`**
+
+This is especially useful because AWS's Bedrock console getting-started documentation uses `us-east-1` for its examples. ([AWS Documentation][4])
+
+At the top-right of the AWS Console:
+
+```text
+Region
+    ↓
+US East (N. Virginia)
+us-east-1
+```
+
+**Keep the same region for Lambda, API Gateway, DynamoDB and Bedrock.**
+
+---
+
+# PART 2 — Set up billing protection
+
+Before touching Bedrock, I strongly recommend creating a billing alarm.
+
+Go to:
+
+**AWS Console → Billing and Cost Management**
+
+Then look for:
+
+**Budgets**
+
+Create a budget.
+
+For example:
+
+```text
+Budget name:
+GenAI-Project-Budget
+
+Budget amount:
+$5
+```
+
+Set an email notification at:
+
+```text
+80%
+```
+
+and another at:
+
+```text
+100%
+```
+
+---
+
+# PART 3 — Enable Amazon Bedrock
+
+Now the actual Gen-AI portion.
+
+Open:
+
+**AWS Console → search "Bedrock"**
+
+Select:
+
+**Amazon Bedrock**
+
+Make sure you're in:
+
+```text
+US East (N. Virginia)
+us-east-1
+```
+
+---
+
+## Step 2 — Check model access
+
+In Bedrock:
+
+**Left menu → Model access**
+
+Depending on the current console experience, many Bedrock foundation models may already be available, while some models/providers require additional access steps. AWS documents model access management from this page. ([AWS Documentation][6])
+
+Look for an Amazon Nova text model.
+
+For this project, use:
+
+**Amazon Nova Micro**
+
+if it is available in your region/account.
+
+Do **not** enable every model.
+
+We only need one text model.
+
+---
+
+# PART 4 — Test Bedrock BEFORE writing Lambda
+
+This is an important professional practice.
+
+Don't build the entire application and then discover Bedrock doesn't work.
+
+Go to:
+
+**Bedrock → Playgrounds → Text**
+
+Choose:
+
+**Select model**
+
+Select:
+
+```text
+Amazon
+   ↓
+Nova Micro
+```
+
+Enter:
+
+```text
+Explain Generative AI in simple terms for a beginner.
+```
+
+Click:
+
+**Run**
+
+You should receive something similar to:
+
+```text
+Generative AI is a type of artificial intelligence
+that can create new content such as text, images,
+code, audio, and more.
+```
+
+AWS's Bedrock console supports testing models directly through the Text Playground. ([AWS Documentation][4])
+
+### If this works
+
+Excellent.
+
+Your Bedrock layer is working.
+
+---
+
+# PART 5 — Create the DynamoDB database
+
+Now we'll store conversations.
+
+Go to:
+
+**AWS Console → DynamoDB**
+
+Select:
+
+**Tables**
+
+Then:
+
+**Create table**
+
+Use:
+
+```text
+Table name:
+GenAIChatHistory
+```
+
+Partition key:
+
+```text
+sessionId
+```
+
+Type:
+
+```text
+String
+```
+
+For this beginner project, keep the configuration as simple as possible.
+
+Create the table.
+
+---
+
+## Why DynamoDB?
+
+Suppose the user asks:
+
+```text
+What is AWS Lambda?
+```
+
+We want to save:
+
+```text
+sessionId
+question
+answer
+timestamp
+```
+
+Example:
+
+```json
+{
+  "sessionId": "user123",
+  "question": "What is AWS Lambda?",
+  "answer": "AWS Lambda is a serverless compute service...",
+  "timestamp": "2026-08-23T13:30:00"
+}
+```
+
+DynamoDB is suitable for this kind of simple serverless application and AWS provides a Free Tier-eligible DynamoDB tutorial. ([Amazon Web Services, Inc.][7])
+
+---
+
+# PART 6 — Create the Lambda function
+
+Now we're going to create the brain of our application.
+
+Go to:
+
+**AWS Console → Lambda**
+
+Select:
+
+**Functions**
+
+Then:
+
+**Create function**
+
+Choose:
+
+```text
+Author from scratch
+```
+
+Function name:
+
+```text
+GenAI-Bedrock-Lambda
+```
+
+Runtime:
+
+```text
+Python 3.14
+```
+
+AWS currently lists Python 3.14 as a supported Lambda runtime in its getting-started documentation. ([AWS Documentation][8])
+
+Architecture:
+
+```text
+x86_64
+```
+
+Leave the remaining options at their defaults.
+
+Click:
+
+**Create function**
+
+---
+
+# PART 7 — Understand what Lambda is doing
+
+Our Lambda will receive this:
+
+```json
+{
+    "question": "Explain AWS Lambda"
+}
+```
+
+Then:
+
+```text
+API Gateway
+      |
+      v
+Lambda
+      |
+      v
+Bedrock
+      |
+      v
+AI response
+      |
+      v
+Lambda
+      |
+      v
+API Gateway
+      |
+      v
+Browser
+```
+
+At the same time, Lambda will save the conversation in DynamoDB.
+
+---
+
+# PART 8 — Give Lambda permission to use Bedrock
+
+This is one of the most important AWS concepts in the project.
+
+Lambda does **not automatically have permission** to call Bedrock.
+
+Lambda has an:
+
+**Execution Role**
+
+Go to your Lambda function.
+
+Choose:
+
+**Configuration → Permissions**
+
+You'll see something like:
+
+```text
+Execution role
+GenAI-Bedrock-Lambda-role-xxxxx
+```
+
+Click the role.
+
+This opens:
+
+**IAM**
+
+---
+
+## Step 3 — Add Bedrock permission
+
+Choose:
+
+**Add permissions**
+
+Then:
+
+**Attach policies**
+
+Search:
+
+```text
+AmazonBedrock
+```
+
+For a learning project, you may use the relevant Bedrock access policy available in your account.
+
+For a production application, we should later replace broad permissions with a tightly scoped custom policy.
+
+For now, the important concept is:
+
+```text
+Lambda
+   |
+   | IAM permission
+   v
+Amazon Bedrock
+```
+
+AWS documents that a Lambda execution role grants the function permissions to access AWS services. ([AWS Documentation][9])
+
+---
+
+# PART 9 — Give Lambda DynamoDB permission
+
+The Lambda also needs permission to write to:
+
+```text
+GenAIChatHistory
+```
+
+In the same IAM role, add the appropriate DynamoDB permissions.
+
+For learning, a broad DynamoDB policy is easiest.
+
+Later we can improve this to:
+
+```text
+Lambda
+   |
+   +---- Bedrock permission
+   |
+   +---- DynamoDB permission
+```
+
+with access limited specifically to:
+
+```text
+GenAIChatHistory
+```
+
+---
+
+# PART 10 — Write the Lambda code
+
+Now return to:
+
+**Lambda → GenAI-Bedrock-Lambda → Code**
+
+You'll see the inline code editor.
+
+Delete the existing code.
+
+Use this architecture:
+
+```text
+import JSON
+import boto3
+import uuid
+from datetime import datetime
+
+create Bedrock client
+create DynamoDB client
+
+receive question
+
+send question to Bedrock
+
+receive AI response
+
+save question + answer
+
+return response
+```
+
+For the first version, I recommend using the **Bedrock Converse API**, because it gives us a clean interface for model conversations and makes it easier to change models later. AWS's current Bedrock quickstart documents the Converse/Invoke APIs for inference. ([AWS Documentation][10])
+
+A Lambda implementation can look like this:
+
+```python
+import json
+import boto3
+import uuid
+from datetime import datetime, timezone
+
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+
+table = dynamodb.Table("GenAIChatHistory")
+
+MODEL_ID = "amazon.nova-micro-v1:0"
+
+
+def lambda_handler(event, context):
+
+    try:
+
+        # -----------------------------
+        # 1. Get request body
+        # -----------------------------
+
+        body = event.get("body")
+
+        if isinstance(body, str):
+            body = json.loads(body)
+
+        question = body.get("question", "").strip()
+
+        if not question:
+            return {
+                "statusCode": 400,
+                "headers": {
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*"
+                },
+                "body": json.dumps({
+                    "error": "Question is required"
+                })
+            }
+
+        # -----------------------------
+        # 2. Call Amazon Bedrock
+        # -----------------------------
+
+        response = bedrock.converse(
+            modelId=MODEL_ID,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "text": question
+                        }
+                    ]
+                }
+            ],
+            inferenceConfig={
+                "maxTokens": 300,
+                "temperature": 0.7
+            }
+        )
+
+        # -----------------------------
+        # 3. Extract AI response
+        # -----------------------------
+
+        answer = response["output"]["message"]["content"][0]["text"]
+
+        # -----------------------------
+        # 4. Save conversation
+        # -----------------------------
+
+        session_id = str(uuid.uuid4())
+
+        table.put_item(
+            Item={
+                "sessionId": session_id,
+                "question": question,
+                "answer": answer,
+                "timestamp": datetime.now(
+                    timezone.utc
+                ).isoformat()
+            }
+        )
+
+        # -----------------------------
+        # 5. Return result
+        # -----------------------------
+
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*"
+            },
+            "body": json.dumps({
+                "success": True,
+                "question": question,
+                "answer": answer
+            })
+        }
+
+    except Exception as e:
+
+        print("ERROR:", str(e))
+
+        return {
+            "statusCode": 500,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*"
+            },
+            "body": json.dumps({
+                "success": False,
+                "error": str(e)
+            })
+        }
+```
+
+### Important
+
+The exact Bedrock model ID can vary by model/region/account availability.
+
+If:
+
+```text
+amazon.nova-micro-v1:0
+```
+
+isn't accepted in your console, **don't guess the ID**.
+
+We can get the exact model ID from your Bedrock Model Catalog.
+
+---
+
+# PART 11 — Test Lambda directly
+
+Before API Gateway, test Lambda.
+
+Go to:
+
+**Lambda → Test**
+
+Create a new test event.
+
+Event JSON:
+
+```json
+{
+  "body": "{\"question\":\"Explain AWS Lambda in simple words\"}"
+}
+```
+
+Click:
+
+**Test**
+
+---
+
+## Expected result
+
+You should get:
+
+```json
+{
+  "statusCode": 200,
+  "body": "..."
+}
+```
+
+Inside the body you'll see something like:
+
+```json
+{
+  "success": true,
+  "question": "Explain AWS Lambda in simple words",
+  "answer": "AWS Lambda is a serverless..."
+}
+```
+
+If you get this:
+
+```text
+AccessDeniedException
+```
+
+then the problem is IAM.
+
+If you get:
+
+```text
+ResourceNotFoundException
+```
+
+check the model ID/region.
+
+If you get:
+
+```text
+ValidationException
+```
+
+check the Bedrock request/model configuration.
+
+---
+
+# PART 12 — Create API Gateway
+
+Now we expose Lambda to the internet.
+
+Go to:
+
+**AWS Console → API Gateway**
+
+Choose:
+
+**Create API**
+
+Select:
+
+**HTTP API**
+
+Click:
+
+**Build**
+
+AWS recommends HTTP APIs for simple serverless endpoints because they are designed with fewer features and lower pricing than REST APIs. ([AWS Documentation][11])
+
+---
+
+## Integration
+
+Choose:
+
+```text
+Lambda
+```
+
+Select:
+
+```text
+GenAI-Bedrock-Lambda
+```
+
+API name:
+
+```text
+GenAI-API
+```
+
+Click:
+
+**Next**
+
+---
+
+# PART 13 — Create the API route
+
+Configure:
+
+```text
+Method:
+POST
+
+Resource path:
+/ask
+```
+
+So the final API will look approximately like:
+
+```text
+POST
+https://xxxxxxxx.execute-api.us-east-1.amazonaws.com/ask
+```
+
+Continue through the API Gateway wizard.
+
+Create the API.
+
+AWS's official tutorial follows this same general architecture: Lambda → API Gateway integration → deploy → invoke endpoint. ([AWS Documentation][3])
+
+---
+
+# PART 14 — Test the API
+
+API Gateway will provide an endpoint.
+
+Copy it.
+
+It will look like:
+
+```text
+https://xxxxxxxx.execute-api.us-east-1.amazonaws.com/ask
+```
+
+You can test it using an API client.
+
+Send:
+
+```json
+{
+    "question": "What is Generative AI?"
+}
+```
+
+Expected:
+
+```json
+{
+    "success": true,
+    "question": "What is Generative AI?",
+    "answer": "Generative AI..."
+}
+```
+
+Congratulations.
+
+At this point you have:
+
+```text
+Internet
+   |
+   v
+API Gateway
+   |
+   v
+Lambda
+   |
+   +------> Bedrock
+   |
+   +------> DynamoDB
+```
+
+That's already a legitimate AWS Gen-AI backend.
+
+---
+
+# PART 15 — Build the frontend
+
+Now we'll create a simple ChatGPT-style interface.
+
+We'll use:
+
+**Amazon S3**
+
+Go to:
+
+**S3 → Create bucket**
+
+Bucket name must be globally unique.
+
+For example:
+
+```text
+my-genai-bedrock-project-2026-xxxx
+```
+
+Keep the bucket in:
+
+```text
+us-east-1
+```
+
+---
+
+# PART 16 — Create `index.html`
+
+Create a local file named:
+
+```text
+index.html
+```
+
+The basic frontend will contain:
+
+```text
+-----------------------------------
+        AWS GEN AI ASSISTANT
+-----------------------------------
+
+Ask something:
+
+[ Explain Generative AI        ]
+
+             [ ASK AI ]
+
+-----------------------------------
+
+AI RESPONSE:
+
+Generative AI is...
+```
+
+The JavaScript will send:
+
+```javascript
+fetch(API_URL, {
+    method: "POST",
+
+    headers: {
+        "Content-Type": "application/json"
+    },
+
+    body: JSON.stringify({
+        question: question
+    })
+});
+```
+
+The response will be displayed in the browser.
+
+---
+
+# PART 17 — Upload frontend to S3
+
+Open your bucket.
+
+Choose:
+
+**Upload**
+
+Upload:
+
+```text
+index.html
+```
+
+Now we need to make it accessible as a website.
+
+---
+
+# PART 18 — Enable S3 website hosting
+
+Go to:
+
+**Bucket → Properties**
+
+Find:
+
+**Static website hosting**
+
+Choose:
+
+```text
+Enable
+```
+
+Set:
+
+```text
+Hosting type:
+Host a static website
+```
+
+Index document:
+
+```text
+index.html
+```
+
+Save.
+
+### Important
+
+AWS's current S3 security defaults generally keep public access blocked. For a beginner project, I would actually prefer **not** opening the bucket directly to the public until we decide whether to use S3 website hosting or CloudFront.
+
+For a polished production version, I'd use:
+
+```text
+CloudFront
+    |
+    v
+S3 private bucket
+```
+
+rather than simply making the bucket public.
+
+---
+
+# PART 19 — Connect frontend to API Gateway
+
+Your JavaScript will have:
+
+```javascript
+const API_URL =
+    "YOUR_API_GATEWAY_URL/ask";
+```
+
+For example:
+
+```javascript
+const API_URL =
+    "https://abc123.execute-api.us-east-1.amazonaws.com/ask";
+```
+
+Then:
+
+```javascript
+async function askAI() {
+
+    const question =
+        document.getElementById("question").value;
+
+    const response =
+        await fetch(API_URL, {
+
+            method: "POST",
+
+            headers: {
+                "Content-Type": "application/json"
+            },
+
+            body: JSON.stringify({
+                question: question
+            })
+        });
+
+    const data =
+        await response.json();
+
+    document.getElementById("answer")
+        .innerText = data.answer;
+}
+```
+
+---
+
+# PART 20 — CORS
+
+This is a very common problem.
+
+Your architecture is:
+
+```text
+S3 Website
+     |
+     | different domain
+     v
+API Gateway
+```
+
+The browser can block the request because of **CORS**.
+
+In API Gateway, configure CORS for:
+
+```text
+Allowed origins:
+*
+```
+
+For learning/testing.
+
+Allowed methods:
+
+```text
+POST
+OPTIONS
+```
+
+Allowed headers:
+
+```text
+Content-Type
+```
+
+For production, don't use `*`; specify your actual frontend domain.
+
+---
+
+# PART 21 — Final application
+
+```text
+                    USER
+                     |
+                     v
+              +-------------+
+              | S3 Website  |
+              | HTML/CSS/JS |
+              +------+------+
+                     |
+                     | HTTPS POST
+                     v
+              +-------------+
+              | API Gateway |
+              | POST /ask   |
+              +------+------+
+                     |
+                     v
+              +-------------+
+              |   Lambda    |
+              |   Python    |
+              +------+------+
+                     |
+             +-------+-------+
+             |               |
+             v               v
+       +-----------+   +-------------+
+       | Bedrock   |   | DynamoDB    |
+       | Nova      |   | Chat History|
+       +-----------+   +-------------+
+             |
+             v
+          AI Answer
+             |
+             v
+           USER
+```
+
+---
+
+# PART 22 — Add CloudWatch monitoring
+
+Lambda automatically integrates with CloudWatch Logs.
+
+Go to:
+
+**CloudWatch → Logs → Log groups**
+
+Find:
+
+```text
+/aws/lambda/GenAI-Bedrock-Lambda
+```
+
+Open the latest log stream.
+
+You can see:
+
+```text
+Lambda started
+Question received
+Bedrock request
+Bedrock response
+DynamoDB write
+Lambda completed
+```
+
+This is extremely useful when debugging.
+
+---
+
+# PART 23 — Improve the AI prompt
+
+Right now our Lambda essentially sends:
+
+```text
+Explain AWS Lambda
+```
+
+We can make it much better.
+
+
+
+
+
+User question:
+
+{QUESTION}
+```
+
+Then:
+
+```text
+User
+ ↓
+Lambda
+ ↓
+System instruction + question
+ ↓
+Bedrock
+ ↓
+High-quality answer
+```
+
+This is called **prompt engineering**.
+
+---
+
+# PART 24 — Add conversation memory
+
+Currently each request is independent.
+
+We can make it a real chatbot.
+
+Instead of:
+
+```text
+Question
+   ↓
+Bedrock
+```
+
+we'll have:
+
+```text
+Conversation
+     |
+     v
+DynamoDB
+     |
+     v
+Lambda
+     |
+     v
+Previous messages
+     +
+Current question
+     |
+     v
+Bedrock
+```
+
+Example:
+
+User:
+
+```text
+What is Lambda?
+```
+
+AI:
+
+```text
+AWS Lambda is...
+```
+
+User:
+
+```text
+What are its advantages?
+```
+
+Lambda retrieves the previous conversation:
+
+```text
+User:
+What is Lambda?
+
+AI:
+AWS Lambda is...
+
+User:
+What are its advantages?
+```
+
+and sends the conversation to Bedrock.
+
+Then the AI understands that **"its" means Lambda**.
+
+This makes the project much more impressive.
+
+---
+
+# PART 25 — Add a `/history` API
+
+We can create another endpoint:
+
+```text
+GET /history/{sessionId}
+```
+
+Architecture:
+
+```text
+GET /history
+       |
+       v
+API Gateway
+       |
+       v
+Lambda
+       |
+       v
+DynamoDB
+       |
+       v
+Previous conversations
+```
+
+Now the frontend can display:
+
+```text
+CHAT HISTORY
+
+1. What is AWS Lambda?
+2. Explain Bedrock
+3. What is API Gateway?
+4. Explain DynamoDB
+```
+
+---
+
+# PART 26 — Add a `/summarize` feature
+
+This makes the project more clearly **Generative AI**.
+
+User can enter:
+
+```text
+Paste a long paragraph...
+```
+
+Click:
+
+**Summarize**
+
+Lambda sends:
+
+```text
+Summarize this text in 5 bullet points.
+```
+
+to Bedrock.
+
+Result:
+
+```text
+• Point 1
+• Point 2
+• Point 3
+• Point 4
+• Point 5
+```
+
+---
+
+# PART 27 — Add prompt templates
+
+We can create multiple modes:
+
+```text
+AI Assistant
+    |
+    +-- General Chat
+    |
+    +-- Summarizer
+    |
+    +-- Translator
+    |
+    +-- AWS Tutor
+    |
+    +-- Code Explainer
+```
+
+For example:
+
+```text
+Mode = AWS Tutor
+```
+
+Lambda uses:
+
+```text
+You are an AWS instructor...
+```
+
+Mode:
+
+```text
+Summarizer
+```
+
+Lambda uses:
+
+```text
+Summarize the following...
+```
+
+---
+
+# PART 28 — Add authentication later
+
+For the first version:
+
+```text
+No authentication
+```
+
+is easiest.
+
+For a production project:
+
+```text
+User
+ |
+ v
+Amazon Cognito
+ |
+ v
+API Gateway
+ |
+ v
+Lambda
+```
+
+Then users can:
+
+```text
+Sign Up
+Log In
+Log Out
+```
+
+and each user gets their own chat history.
+
+---
+
+# PART 29 — Security architecture
+
+Eventually we want:
+
+```text
+                  USER
+                    |
+                    v
+               CloudFront
+                    |
+                    v
+                S3 Private
+                    |
+                    v
+                 Cognito
+                    |
+                    v
+               API Gateway
+                    |
+                    v
+                 Lambda
+                 /     \
+                /       \
+               v         v
+          Bedrock     DynamoDB
+```
+
+IAM controls:
+
+```text
+Lambda
+ ├── Bedrock permission
+ └── DynamoDB permission
+```
+
+The frontend should **never** contain:
+
+```text
+AWS Access Key
+AWS Secret Key
+```
+
+Never put AWS secret credentials inside:
+
+```text
+HTML
+JavaScript
+React
+S3
+```
+
+The browser only talks to API Gateway.
+
+---
+
+# PART 30 — What your project demonstrates
+
+If you're doing this as a **college major project / portfolio project**, this is much stronger than simply saying:
+
+> "I used AWS Bedrock."
+
+You can explain:
+
+### Cloud
+
+```text
+AWS
+```
+
+### Generative AI
+
+```text
+Amazon Bedrock
+Amazon Nova
+Prompt Engineering
+```
+
+### Serverless
+
+```text
+AWS Lambda
+API Gateway
+```
+
+### Database
+
+```text
+DynamoDB
+```
+
+### Frontend
+
+```text
+HTML
+CSS
+JavaScript
+S3
+```
+
+### Security
+
+```text
+IAM
+CORS
+Least Privilege
+```
+
+### Monitoring
+
+```text
+CloudWatch
+```
+
+### Architecture
+
+```text
+Serverless Gen-AI Architecture
+```
+
+---
+
+# Complete project roadmap
+
+I recommend doing it in this exact order:
+
+```text
+PHASE 1
+AWS Account
+       ↓
+PHASE 2
+Region + Billing Protection
+       ↓
+PHASE 3
+Amazon Bedrock
+       ↓
+PHASE 4
+Test Nova model
+       ↓
+PHASE 5
+DynamoDB
+       ↓
+PHASE 6
+Lambda
+       ↓
+PHASE 7
+IAM permissions
+       ↓
+PHASE 8
+Lambda → Bedrock
+       ↓
+PHASE 9
+Lambda → DynamoDB
+       ↓
+PHASE 10
+API Gateway
+       ↓
+PHASE 11
+API testing
+       ↓
+PHASE 12
+S3 frontend
+       ↓
+PHASE 13
+S3 → API Gateway
+       ↓
+PHASE 14
+CORS
+       ↓
+PHASE 15
+CloudWatch
+       ↓
+PHASE 16
+Chat history
+       ↓
+PHASE 17
+Prompt engineering
+       ↓
+PHASE 18
+Authentication
+       ↓
+PHASE 19
+Security
+       ↓
+PHASE 20
+Final deployment
+```
+
+## The first milestone
+
+Don't try to build everything at once.
+
+Your **first milestone** should be:
+
+```text
+Bedrock
+   ↓
+Lambda
+   ↓
+API Gateway
+   ↓
+Browser
+```
+
+Once that works, add:
+
+```text
+DynamoDB
+```
+
+Then:
+
+```text
+S3 frontend
+```
+
+Then:
+
+```text
+chat history
+```
+
+Then:
+
+```text
+authentication
+```
+
+
+
